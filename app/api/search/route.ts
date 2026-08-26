@@ -1,4 +1,65 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { inspectWithYtDlp, type YtDlpMetadata } from './ytdlp';
+
+type Verification = {
+  status: 'Conteúdo confirmado' | 'Página confirmada' | 'Inacessível';
+  observed: string;
+  creator?: string;
+  metadata?: YtDlpMetadata;
+};
+
+function compactNumber(value: number | undefined) {
+  if (value === undefined) return undefined;
+  return new Intl.NumberFormat('pt-BR', { notation: 'compact', maximumFractionDigits: 1 }).format(value);
+}
+
+function isDirectVideoUrl(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  try {
+    const url = new URL(value);
+    const host = url.hostname.replace(/^www\./, '');
+    if (host === 'vt.tiktok.com' || host === 'vm.tiktok.com') return url.pathname.length > 1;
+    if (host === 'tiktok.com') return /\/@[^/]+\/video\/\d+/.test(url.pathname) || /^\/t\//.test(url.pathname);
+    if (host === 'instagram.com') return /^\/(reel|reels|p)\/[^/]+/.test(url.pathname);
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+async function verifyPublicVideo(source: string): Promise<Verification> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const metadata = await inspectWithYtDlp(source);
+    if (metadata) {
+      const facts = [metadata.creator && `autor ${metadata.creator}`, metadata.duration !== undefined && `duração ${Math.round(metadata.duration)}s`, metadata.viewCount !== undefined && `${compactNumber(metadata.viewCount)} visualizações`, metadata.likeCount !== undefined && `${compactNumber(metadata.likeCount)} curtidas`].filter(Boolean).join(', ');
+      return { status: 'Conteúdo confirmado', creator: metadata.creator, metadata, observed: `Vídeo lido automaticamente pelo yt-dlp${facts ? `: ${facts}` : ''}.` };
+    }
+    const url = new URL(source);
+    const host = url.hostname.replace(/^www\./, '');
+    if (host === 'tiktok.com') {
+      const response = await fetch(`https://www.tiktok.com/oembed?url=${encodeURIComponent(source)}`, {
+        signal: controller.signal,
+        headers: { Accept: 'application/json' },
+      });
+      if (!response.ok) return { status: 'Inacessível', observed: `O TikTok não confirmou o vídeo (HTTP ${response.status}).` };
+      const data = await response.json() as { title?: string; author_name?: string };
+      if (!data.title && !data.author_name) return { status: 'Inacessível', observed: 'O TikTok respondeu, mas não identificou o conteúdo.' };
+      return { status: 'Conteúdo confirmado', creator: data.author_name, observed: `Vídeo confirmado pelo TikTok${data.author_name ? `, publicado por ${data.author_name}` : ''}. Legenda pública: ${data.title || 'indisponível'}` };
+    }
+    const response = await fetch(source, { signal: controller.signal, redirect: 'follow', headers: { Accept: 'text/html', 'User-Agent': 'Mozilla/5.0 (compatible; TrendFinder/1.0)' } });
+    if (!response.ok) return { status: 'Inacessível', observed: `O Instagram não liberou a página pública (HTTP ${response.status}).` };
+    const html = await response.text();
+    const title = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)/i)?.[1] || html.match(/<title>([^<]+)<\/title>/i)?.[1];
+    const hasMedia = /og:video|video_url|instagram-media/i.test(html);
+    return { status: hasMedia ? 'Conteúdo confirmado' : 'Página confirmada', observed: `${hasMedia ? 'Reel público identificado' : 'Página pública identificada'}, mas o Instagram pode ocultar reprodução e métricas. ${title ? `Título: ${title}` : ''}`.trim() };
+  } catch {
+    return { status: 'Inacessível', observed: 'A plataforma bloqueou ou não respondeu à verificação automática.' };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 const schema = {
   type: 'object',
@@ -94,7 +155,14 @@ Regras obrigatórias:
   let parsed:{trends:Array<Record<string,unknown>>};
   try{parsed=JSON.parse(outputText) as {trends:Array<Record<string,unknown>>}}catch{return NextResponse.json({error:'A resposta da pesquisa chegou incompleta e não pôde ser interpretada.'},{status:502})}
   if(!Array.isArray(parsed.trends))return NextResponse.json({error:'A resposta estruturada não contém a lista de vídeos esperada.'},{status:502});
-  const valid = parsed.trends.filter(trend => typeof trend.source === 'string' && /^https:\/\/(www\.)?(tiktok\.com|instagram\.com)\//i.test(trend.source));
-  if (!valid.length) return NextResponse.json({ error: 'Nenhum vídeo direto e verificável foi encontrado nesta busca.' }, { status: 502 });
-  return NextResponse.json({ trends: valid.map((trend, index) => ({ ...trend, rank: index + 1 })) });
+  const candidates = parsed.trends.filter(trend => isDirectVideoUrl(trend.source));
+  const checked = await Promise.all(candidates.map(async trend => ({ trend, verification: await verifyPublicVideo(String(trend.source)) })));
+  const valid = checked.filter(item => item.verification.status !== 'Inacessível');
+  if (!valid.length) return NextResponse.json({ error: 'Encontrei referências, mas nenhuma plataforma liberou um vídeo direto para verificação automática. Tente outro insight ou período.' }, { status: 502 });
+  return NextResponse.json({ trends: valid.map(({trend, verification}, index) => {
+    const reportedScore = typeof trend.score === 'number' ? trend.score : 0;
+    const metricsAvailable = verification.metadata?.viewCount !== undefined || verification.metadata?.likeCount !== undefined || trend.views !== 'Indisponível' || trend.likes !== 'Indisponível';
+    const ceiling = verification.status === 'Conteúdo confirmado' ? (metricsAvailable ? 92 : 78) : 62;
+    return { ...trend, rank: index + 1, score: Math.min(reportedScore, ceiling), title: verification.metadata?.title || trend.title, creator: verification.creator || trend.creator, publishedAt: verification.metadata?.uploadDate || trend.publishedAt, views: compactNumber(verification.metadata?.viewCount) || trend.views, likes: compactNumber(verification.metadata?.likeCount) || trend.likes, verification: verification.status, observedContent: verification.observed, evidence: `${trend.evidence} Verificação automática: ${verification.observed}` };
+  }) });
 }
