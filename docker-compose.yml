@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: viral-trend-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: viral_trends
+      POSTGRES_USER: trend_app
+      POSTGRES_PASSWORD: trend_app_local
+    ports:
+      - "5432:5432"
+    volumes:
+      - viral_trend_postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trend_app -d viral_trends"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  viral_trend_postgres_data:

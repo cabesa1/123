@@ -1,6 +1,6 @@
 ---
 name: video-scriptwriter
-description: Turn an approved short-form video concept into a production-ready TikTok, Instagram Reels, or YouTube Shorts script with timed scenes, spoken lines, on-screen text, shots, editing notes, and CTA. Use after concept selection or for a direct script request; do not research trends or invent evidence.
+description: Turn an approved short-form video concept into a production-ready TikTok or Instagram Reels script with timed scenes, spoken lines, on-screen text, shots, editing notes, and CTA. Use after concept selection or for a direct script request; do not research trends or invent evidence.
 ---
 
 # Video Scriptwriter

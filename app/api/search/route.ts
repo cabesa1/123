@@ -1,16 +1,25 @@
+import OpenAI from 'openai';
 import { NextRequest, NextResponse } from 'next/server';
+import { loadSearchInstructions } from '@/lib/agent-skills';
+import { runSearcherAgent } from '@/lib/agents/searcher-agent';
+import { runVerifierAgent } from '@/lib/agents/verifier-agent';
+import { runStrategistScorerAgent } from '@/lib/agents/strategist-scorer-agent';
+import { createManagerAgent, type ManagerAgent } from '@/lib/agents/marketing-orchestrator';
 import { inspectWithYtDlp, type YtDlpMetadata } from './ytdlp';
 
-type Verification = {
-  status: 'Conteúdo confirmado' | 'Página confirmada' | 'Inacessível';
-  observed: string;
-  creator?: string;
-  metadata?: YtDlpMetadata;
-};
+export const runtime = 'nodejs';
+
+type Verification = { status: 'Conteúdo confirmado' | 'Inacessível'; observed: string; title?: string; creator?: string; metadata?: YtDlpMetadata };
 
 function compactNumber(value: number | undefined) {
-  if (value === undefined) return undefined;
-  return new Intl.NumberFormat('pt-BR', { notation: 'compact', maximumFractionDigits: 1 }).format(value);
+  return value === undefined ? undefined : new Intl.NumberFormat('pt-BR', { notation: 'compact', maximumFractionDigits: 1 }).format(value);
+}
+
+function percentile(value: number, values: number[]) {
+  if (values.length < 2) return 50;
+  const below = values.filter(candidate => candidate < value).length;
+  const equal = values.filter(candidate => candidate === value).length;
+  return Math.round(((below + (equal - 1) / 2) / (values.length - 1)) * 100);
 }
 
 function isDirectVideoUrl(value: unknown): value is string {
@@ -20,149 +29,135 @@ function isDirectVideoUrl(value: unknown): value is string {
     const host = url.hostname.replace(/^www\./, '');
     if (host === 'vt.tiktok.com' || host === 'vm.tiktok.com') return url.pathname.length > 1;
     if (host === 'tiktok.com') return /\/@[^/]+\/video\/\d+/.test(url.pathname) || /^\/t\//.test(url.pathname);
-    if (host === 'instagram.com') return /^\/(reel|reels|p)\/[^/]+/.test(url.pathname);
+    if (host === 'instagram.com') {
+      const match = url.pathname.match(/^\/(?:reel|reels|p)\/([A-Za-z0-9_-]{5,})\/?$/);
+      return Boolean(match && !['indisponivel', 'indisponível', 'unknown', 'undefined', 'null', 'example'].includes(match[1].toLowerCase()));
+    }
     return false;
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
 async function verifyPublicVideo(source: string): Promise<Verification> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
+  const timeout = setTimeout(() => controller.abort(), 8_000);
   try {
     const metadata = await inspectWithYtDlp(source);
     if (metadata) {
-      const facts = [metadata.creator && `autor ${metadata.creator}`, metadata.duration !== undefined && `duração ${Math.round(metadata.duration)}s`, metadata.viewCount !== undefined && `${compactNumber(metadata.viewCount)} visualizações`, metadata.likeCount !== undefined && `${compactNumber(metadata.likeCount)} curtidas`].filter(Boolean).join(', ');
+      const facts = [
+        metadata.creator && `autor ${metadata.creator}`,
+        metadata.duration !== undefined && `duração ${Math.round(metadata.duration)}s`,
+        metadata.viewCount !== undefined && `${compactNumber(metadata.viewCount)} visualizações`,
+        metadata.likeCount !== undefined && `${compactNumber(metadata.likeCount)} curtidas`,
+      ].filter(Boolean).join(', ');
       return { status: 'Conteúdo confirmado', creator: metadata.creator, metadata, observed: `Vídeo lido automaticamente pelo yt-dlp${facts ? `: ${facts}` : ''}.` };
     }
     const url = new URL(source);
-    const host = url.hostname.replace(/^www\./, '');
-    if (host === 'tiktok.com') {
-      const response = await fetch(`https://www.tiktok.com/oembed?url=${encodeURIComponent(source)}`, {
-        signal: controller.signal,
-        headers: { Accept: 'application/json' },
-      });
+    if (url.hostname.replace(/^www\./, '') === 'tiktok.com') {
+      const response = await fetch(`https://www.tiktok.com/oembed?url=${encodeURIComponent(source)}`, { signal: controller.signal, headers: { Accept: 'application/json' } });
       if (!response.ok) return { status: 'Inacessível', observed: `O TikTok não confirmou o vídeo (HTTP ${response.status}).` };
       const data = await response.json() as { title?: string; author_name?: string };
       if (!data.title && !data.author_name) return { status: 'Inacessível', observed: 'O TikTok respondeu, mas não identificou o conteúdo.' };
-      return { status: 'Conteúdo confirmado', creator: data.author_name, observed: `Vídeo confirmado pelo TikTok${data.author_name ? `, publicado por ${data.author_name}` : ''}. Legenda pública: ${data.title || 'indisponível'}` };
+      return { status: 'Conteúdo confirmado', creator: data.author_name, title: data.title, observed: `Vídeo confirmado pelo TikTok${data.author_name ? `, publicado por ${data.author_name}` : ''}.` };
     }
-    const response = await fetch(source, { signal: controller.signal, redirect: 'follow', headers: { Accept: 'text/html', 'User-Agent': 'Mozilla/5.0 (compatible; TrendFinder/1.0)' } });
-    if (!response.ok) return { status: 'Inacessível', observed: `O Instagram não liberou a página pública (HTTP ${response.status}).` };
-    const html = await response.text();
-    const title = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)/i)?.[1] || html.match(/<title>([^<]+)<\/title>/i)?.[1];
-    const hasMedia = /og:video|video_url|instagram-media/i.test(html);
-    return { status: hasMedia ? 'Conteúdo confirmado' : 'Página confirmada', observed: `${hasMedia ? 'Reel público identificado' : 'Página pública identificada'}, mas o Instagram pode ocultar reprodução e métricas. ${title ? `Título: ${title}` : ''}`.trim() };
-  } catch {
-    return { status: 'Inacessível', observed: 'A plataforma bloqueou ou não respondeu à verificação automática.' };
-  } finally {
-    clearTimeout(timeout);
-  }
+    return { status: 'Inacessível', observed: 'O Instagram não liberou o vídeo para leitura automática sem login.' };
+  } catch { return { status: 'Inacessível', observed: 'A plataforma bloqueou ou não respondeu à verificação automática.' }; }
+  finally { clearTimeout(timeout); }
 }
 
 const schema = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    trends: {
-      type: 'array', minItems: 1, maxItems: 5,
-      items: {
-        type: 'object', additionalProperties: false,
-        properties: {
-          platform: { type: 'string' }, title: { type: 'string' }, pattern: { type: 'string' },
-          views: { type: 'string' }, likes: { type: 'string' }, score: { type: 'integer', minimum: 0, maximum: 100 },
-          growth: { type: 'string' }, difficulty: { type: 'string', enum: ['Fácil', 'Médio', 'Difícil'] },
-          hook: { type: 'string' }, fit: { type: 'string' }, steps: { type: 'array', minItems: 3, maxItems: 5, items: { type: 'string' } },
-          source: { type: 'string' }, creator: { type: 'string' }, publishedAt: { type: 'string' }, evidence: { type: 'string' },
-        },
-        required: ['platform','title','pattern','views','likes','score','growth','difficulty','hook','fit','steps','source','creator','publishedAt','evidence'],
-      },
+  type: 'object', additionalProperties: false,
+  properties: { trends: { type: 'array', minItems: 0, maxItems: 5, items: {
+    type: 'object', additionalProperties: false,
+    properties: {
+      platform: { type: 'string', enum: ['TikTok', 'Instagram'] }, title: { type: 'string' }, pattern: { type: 'string' },
+      views: { type: 'string' }, likes: { type: 'string' }, score: { type: 'integer', minimum: 0, maximum: 100 },
+      growth: { type: 'string' }, difficulty: { type: 'string', enum: ['Fácil', 'Médio', 'Difícil'] },
+      hook: { type: 'string' }, fit: { type: 'string' }, steps: { type: 'array', minItems: 3, maxItems: 5, items: { type: 'string' } },
+      source: { type: 'string' }, creator: { type: 'string' }, publishedAt: { type: 'string' }, evidence: { type: 'string' },
     },
-  },
-  required: ['trends'],
-};
+    required: ['platform','title','pattern','views','likes','score','growth','difficulty','hook','fit','steps','source','creator','publishedAt','evidence'],
+  } } }, required: ['trends'],
+} as const;
+
+async function generateWithOllama(instructions: string, input: string, query: string, platform: string, agentRun: ManagerAgent) {
+  const discovery = await agentRun.supervise('searcher', attempt => runSearcherAgent(attempt === 1 ? query : `${query} vídeo curto reels tiktok` , platform), result => result.urls.length > 0, 'O Searcher não encontrou URLs diretas após duas tentativas.');
+  const urls = discovery.urls;
+  if (!urls.length) throw new Error('A busca pública não encontrou links diretos. Tente palavras mais específicas.');
+  const verification = await agentRun.supervise('verifier', () => runVerifierAgent(urls), result => result.confirmed.length > 0, 'O Verifier não confirmou visualizações reais após duas tentativas.');
+  const confirmed = verification.confirmed;
+  if (!confirmed.length) throw new Error('Foram encontrados links, mas nenhum liberou métricas reais para o yt-dlp.');
+  const evidence = confirmed.map(item => ({ source: item.source, ...item.metadata }));
+  const response = await fetch(`${process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434'}/api/chat`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(180_000),
+    body: JSON.stringify({
+      model: process.env.OLLAMA_MODEL || 'qwen3:4b', stream: false, format: schema,
+      options: { temperature: 0 },
+      messages: [
+        { role: 'system', content: instructions },
+        { role: 'user', content: `${input}\n\nUse SOMENTE estes vídeos já confirmados pelo sistema:\n${JSON.stringify(evidence)}\nNão altere as URLs nem as métricas.` },
+      ],
+    }),
+  });
+  const data = await response.json() as { message?: { content?: string }; error?: string };
+  if (!response.ok || !data.message?.content) throw new Error(data.error || 'O Ollama não retornou conteúdo.');
+  return data.message.content;
+}
 
 export async function POST(request: NextRequest) {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) return NextResponse.json({ error: 'OPENAI_API_KEY_NOT_CONFIGURED' }, { status: 503 });
-  let body:{ query?: string; platform?: string; period?: string; brand?: string; category?: string; exclude?: string[] };
-  try{body=await request.json()}catch{return NextResponse.json({error:'A solicitação enviada ao servidor não contém JSON válido.'},{status:400})}
+  let body: { query?: string; platform?: string; period?: string; brand?: string; category?: string; exclude?: string[] };
+  try { body = await request.json(); } catch { return NextResponse.json({ error: 'A solicitação enviada ao servidor não contém JSON válido.' }, { status: 400 }); }
   if (!body.query?.trim()) return NextResponse.json({ error: 'Informe o tipo de vídeo.' }, { status: 400 });
 
-  const brand = body.brand || 'Economize.vc';
-  const category = body.category || 'Humorístico';
-  const brandContext = brand === 'Economize.vc'
-    ? 'outlet Open Box de Sorocaba com eletrônicos, eletrodomésticos e descontos'
-    : 'SAFE-K é uma bolsa/case física com trava. O celular permanece com o próprio usuário, mas fica inacessível durante o período de foco. É voltada principalmente a escolas e estudantes, além de empresas e eventos. Não é aplicativo, capa protetora nem cofre coletivo. Não afirmar bloqueio de sinal sem prova técnica. A proposta é implementar ambientes com menos distrações, mais presença e uso consciente da tecnologia.';
-  const categoryCriteria = category === 'Institucional'
-    ? 'Priorize vídeos que comuniquem propósito, mecanismo, design, bastidores, prova ou transformação percebida. O conceito deve fortalecer confiança e identidade premium, sem depender de humor.'
-    : category === 'Educacional'
-      ? 'Priorize vídeos que ensinem uma prática aplicável sobre foco, ambiente de estudo, atenção ou bem-estar digital. Diferencie evidência de opinião e evite alegações clínicas ou promessas de produtividade garantida.'
-      : 'Priorize situações reconhecíveis de distração, procrastinação, notificações e autoengano. O público deve rir de si mesmo; nunca humilhe estudantes, funcionários ou pessoas com dificuldade de foco.';
-  const scoreCriteria=brand==='SAFE-K'
-    ? 'Para SAFE-K, calcule o score com: autoridade e rastreabilidade da fonte 30%, aderência ao problema educacional 25%, desempenho público observável 25% e aplicabilidade concreta da Bag SAFE-K 20%.'
-    : 'Para Economize.vc, calcule o score com: evidência pública 35%, aderência ao brief 25%, adequação à categoria 20% e facilidade de adaptação 20%.';
-  const prompt = `Pesquise na web referências REAIS de vídeos curtos para esta busca: ${body.query}.
-Plataformas permitidas: ${body.platform && body.platform !== 'Todas' ? body.platform : 'TikTok e Instagram Reels'}. Não retorne YouTube Shorts nem qualquer outra plataforma. Período preferido: ${body.period || 'mais recente disponível'}.
-Marca de destino: ${brand}. Contexto: ${brandContext}. Categoria obrigatória: ${category}.
-Critério específico da categoria: ${categoryCriteria}
-O objetivo é encontrar vídeos de outros criadores e adaptar seus padrões, sem copiar, para a marca de destino.
-Ignore URLs já entregues: ${(body.exclude || []).join(', ') || 'nenhuma'}.
+  const brand = body.brand === 'SAFE-K' ? 'SAFE-K' : 'Economize.vc';
+  const allowedCategories = brand === 'SAFE-K' ? ['Institucional', 'Educacional'] : ['Institucional', 'Humorístico', 'Educacional'];
+  const category = allowedCategories.includes(body.category || '') ? body.category! : allowedCategories[0];
+  let runtime: Awaited<ReturnType<typeof loadSearchInstructions>>;
+  try { runtime = await loadSearchInstructions(brand); }
+  catch (reason) { console.error('Falha ao carregar skills', reason); return NextResponse.json({ error: 'As skills da pesquisa não puderam ser carregadas.' }, { status: 500 }); }
 
-Regras obrigatórias:
-- Retorne no máximo 5 referências fortes; menos se não houver evidência suficiente.
-- Cada source deve ser obrigatoriamente a URL direta e verificável do vídeo original no TikTok ou Instagram. Não retorne páginas de busca, matérias ou perfis. Nunca invente URL, autor, data ou métrica.
-- Use somente números públicos observáveis. Quando indisponível, escreva "Indisponível", nunca zero.
-- ${scoreCriteria} Se faltarem métricas ou credenciais, reduza o score e explique em evidence.
-- Diferencie vídeo isolado de tendência repetida. Não declare crescimento sem dados; use "Não calculável".
-- Respeite o tom da SAFE-K: claro, contemporâneo, humano e premium; nunca punitivo, moralista, alarmista ou hostil à tecnologia.
-- Quando a marca for SAFE-K, priorize: advogados de direito educacional ou digital; médicos, psicólogos e pesquisadores falando dentro de sua área; professores, pedagogos, diretores e escolas; demonstrações reais de bolsas/cases com trava. Confirme a credencial na fonte original — jaleco ou legenda não comprovam autoridade.
-- Para SAFE-K, busque primeiro dúvidas reais: Lei 15.100/2025 e suas exceções, responsabilidade e privacidade, emergências, uso pedagógico autorizado, atenção e notificações, comunicação com responsáveis, implementação na escola e resistência de alunos. Separe obrigação legal, orientação profissional, experiência institucional e alegação comercial.
-- Para SAFE-K, prefira formatos de especialista respondendo pergunta, corte original de entrevista/podcast com origem, mito versus fato, demonstração de implementação e objeção respondida. Conteúdo educacional tem prioridade sobre humor.
-- A sequência de produto correta é: chegada, celular colocado na Bag, travamento, aparelho permanece com a pessoa e desbloqueio ao encostar a Bag na base própria.
-- Para SAFE-K, toda adaptação deve mostrar concretamente a case: colocar o celular, travar, permanecer com o usuário, liberar, responder objeção ou demonstrar material e rotina. Não entregue apenas conselho abstrato sobre foco.
-- Classifique dificuldade assim: Fácil = uma pessoa, um local, celular e case, até cinco planos e sem revisão especializada; Médio = especialista convidado ou duas pessoas, demonstração completa, checagem de fontes ou múltiplos enquadramentos; Difícil = escola real e autorizações, múltiplos especialistas/locações, atores/alunos ou revisão médica/jurídica. A identidade azul da marca nunca altera essa classificação.
-- Não faça alegações sobre TDAH, ansiedade, dependência ou tratamento médico. Não prometa produtividade garantida.
-- Não reutilize percentuais, depoimentos ou ganhos acadêmicos sem fonte, amostra e contexto verificáveis.
-- fit e steps devem ser uma adaptação original para ${brand}.
-- Responda em português do Brasil.`;
+  const platform = body.platform && body.platform !== 'Todas' ? body.platform : 'Todas';
+  const input = `Execute uma pesquisa real de referências de vídeos curtos.
+Busca: ${body.query.trim()}
+Marca ativa: ${brand}
+Categoria: ${category}
+Plataforma: ${platform === 'Todas' ? 'TikTok e Instagram Reels' : platform}
+Período preferido: ${body.period || 'mais recente disponível'}
+Não repetir: ${(body.exclude || []).join(', ') || 'nenhuma'}
 
-  let response:Response;
-  try{
-    response=await fetch('https://api.openai.com/v1/responses', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: process.env.OPENAI_MODEL || 'gpt-5.4-mini',
+Retorne até cinco referências, ou nenhuma sem evidência suficiente. Aceite somente URLs diretas do TikTok ou Instagram Reels. Nunca invente link, criador, data ou métrica; use "Indisponível" quando faltar. A aplicação validará URL e métricas antes de exibir. fit e steps devem adaptar somente o mecanismo abstrato para a marca. Responda em português do Brasil.`;
+
+  let outputText: string;
+  const provider = process.env.AI_PROVIDER === 'ollama' || !process.env.OPENAI_API_KEY ? 'ollama' : 'openai';
+  const agentRun = createManagerAgent(brand);
+  try {
+    if (provider === 'ollama') outputText = await generateWithOllama(runtime.instructions, input, body.query.trim(), platform, agentRun);
+    else {
+      agentRun.add({ agent: 'searcher', status: 'completed', attempt: 1, brand, detail: 'Pesquisa web executada pelo provedor com URLs diretas exigidas pelo contrato.' });
+      agentRun.add({ agent: 'manager', status: 'completed', attempt: 1, decision: 'approved', brand, detail: 'Searcher autorizado a usar a pesquisa web do provedor.' });
+      const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+      const response = await client.responses.create({
+        model: process.env.OPENAI_MODEL || 'gpt-5.4-mini', instructions: runtime.instructions,
         tools: [{ type: 'web_search_preview', search_context_size: 'high', user_location: { type: 'approximate', country: 'BR', city: 'Sorocaba', region: 'São Paulo' } }],
-        input: prompt,
-        text: { format: { type: 'json_schema', name: 'trend_results', strict: true, schema } },
-        store: false,
-      }),
-    });
-  }catch(reason){
-    const detail=reason instanceof Error?reason.message:'erro de rede desconhecido';
-    return NextResponse.json({error:`Não foi possível conectar à OpenAI: ${detail}`},{status:502});
+        input, text: { format: { type: 'json_schema', name: 'trend_results', strict: true, schema } }, store: false,
+      });
+      outputText = response.output_text;
+    }
+  } catch (reason) {
+    const detail = reason instanceof Error ? reason.message : 'erro desconhecido';
+    return NextResponse.json({ error: `Não foi possível concluir a pesquisa via ${provider === 'ollama' ? 'Ollama local' : 'OpenAI'}: ${detail}` }, { status: 502 });
   }
-  const rawResponse=await response.text();
-  if(!rawResponse.trim())return NextResponse.json({error:`A OpenAI respondeu sem conteúdo (HTTP ${response.status}).`},{status:502});
-  let data:{ output_text?: string; error?: { message?: string }; output?: Array<{ type?: string; content?: Array<{ type?: string; text?: string }> }> };
-  try{data=JSON.parse(rawResponse)}catch{return NextResponse.json({error:`A OpenAI retornou uma resposta que não é JSON válido (HTTP ${response.status}).`},{status:502})}
-  if (!response.ok) return NextResponse.json({ error: data.error?.message || `Falha na pesquisa (HTTP ${response.status}).` }, { status: response.status });
-  const outputText = data.output_text || data.output?.flatMap(item => item.content || []).find(part => part.type === 'output_text')?.text;
-  if (!outputText) return NextResponse.json({ error: 'A pesquisa não retornou resultados estruturados.' }, { status: 502 });
-  let parsed:{trends:Array<Record<string,unknown>>};
-  try{parsed=JSON.parse(outputText) as {trends:Array<Record<string,unknown>>}}catch{return NextResponse.json({error:'A resposta da pesquisa chegou incompleta e não pôde ser interpretada.'},{status:502})}
-  if(!Array.isArray(parsed.trends))return NextResponse.json({error:'A resposta estruturada não contém a lista de vídeos esperada.'},{status:502});
-  const candidates = parsed.trends.filter(trend => isDirectVideoUrl(trend.source));
-  const checked = await Promise.all(candidates.map(async trend => ({ trend, verification: await verifyPublicVideo(String(trend.source)) })));
-  const valid = checked.filter(item => item.verification.status !== 'Inacessível');
-  if (!valid.length) return NextResponse.json({ error: 'Encontrei referências, mas nenhuma plataforma liberou um vídeo direto para verificação automática. Tente outro insight ou período.' }, { status: 502 });
-  return NextResponse.json({ trends: valid.map(({trend, verification}, index) => {
-    const reportedScore = typeof trend.score === 'number' ? trend.score : 0;
-    const metricsAvailable = verification.metadata?.viewCount !== undefined || verification.metadata?.likeCount !== undefined || trend.views !== 'Indisponível' || trend.likes !== 'Indisponível';
-    const ceiling = verification.status === 'Conteúdo confirmado' ? (metricsAvailable ? 92 : 78) : 62;
-    return { ...trend, rank: index + 1, score: Math.min(reportedScore, ceiling), title: verification.metadata?.title || trend.title, creator: verification.creator || trend.creator, publishedAt: verification.metadata?.uploadDate || trend.publishedAt, views: compactNumber(verification.metadata?.viewCount) || trend.views, likes: compactNumber(verification.metadata?.likeCount) || trend.likes, verification: verification.status, observedContent: verification.observed, evidence: `${trend.evidence} Verificação automática: ${verification.observed}` };
-  }) });
+
+  let parsed: { trends: Array<Record<string, unknown>> };
+  try { parsed = JSON.parse(outputText) as { trends: Array<Record<string, unknown>> }; }
+  catch { return NextResponse.json({ error: 'A resposta da pesquisa chegou incompleta e não pôde ser interpretada.' }, { status: 502 }); }
+  if (!Array.isArray(parsed.trends)) return NextResponse.json({ error: 'A resposta estruturada não contém a lista de vídeos esperada.' }, { status: 502 });
+
+  const candidates = parsed.trends.filter(trend => isDirectVideoUrl(trend.source) && (platform === 'Todas' || trend.platform === platform));
+  let verification: Awaited<ReturnType<typeof runVerifierAgent>>;
+  try { verification = await agentRun.supervise('verifier', () => runVerifierAgent(candidates.map(trend => String(trend.source))), result => result.confirmed.length > 0, 'O Verifier não confirmou nenhum resultado com visualizações reais.'); }
+  catch { return NextResponse.json({ error: 'Nenhum vídeo possuía link direto e visualizações confirmadas após duas tentativas.', specialistsUsed: runtime.specialists, agentTrace: agentRun.trace, manager: agentRun.summary() }, { status: 502 }); }
+  if (!verification.confirmed.length) return NextResponse.json({ error: 'Nenhum vídeo encontrado possuía link direto e número de visualizações confirmados pela plataforma. Tente outro insight ou período.', specialistsUsed: runtime.specialists, agentTrace: agentRun.trace }, { status: 502 });
+
+  const ranked = await agentRun.supervise('strategist-scorer', async () => runStrategistScorerAgent(candidates, verification.confirmed), result => result.trends.length > 0 && result.trends.length <= 5 && result.trends.every(trend => typeof trend.score === 'number'), 'O Strategist/Scorer não produziu uma classificação válida.');
+  return NextResponse.json({ trends: ranked.trends, specialistsUsed: runtime.specialists, agentsUsed: agentRun.specialists(), agentTrace: agentRun.trace, manager: agentRun.summary(), providerUsed: provider });
 }

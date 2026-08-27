@@ -27,7 +27,6 @@ Design discreto, acabamento premium, linguagem clara, contemporânea e humana. E
 ## Critérios por categoria
 
 - Institucional: tornar propósito, mecanismo, design e transformação percebida compreensíveis; priorizar demonstração, prova, bastidor, rotina e identidade premium.
-- Humorístico: partir de situações reconhecíveis de distração, procrastinação, notificações e autoengano; o usuário ri de si mesmo, nunca é humilhado.
 - Educacional: ensinar atenção, hábitos, ambiente de estudo ou bem-estar digital com um passo aplicável; distinguir evidência de opinião e evitar alegações clínicas.
 
 ## Fontes e formatos prioritários
@@ -46,9 +45,7 @@ Para a SAFE-K, buscar primeiro conteúdo educativo e institucional em que a auto
 2. `Prova de implementação`: escola, universidade ou organização mostra chegada, travamento, posse, rotina e desbloqueio.
 3. `Objeções`: emergência, privacidade, responsabilidade pelo aparelho, exceções pedagógicas, resistência de alunos e comunicação com responsáveis.
 4. `Demonstração de produto`: acabamento, trava, base, capacidade, aplicação e fluxo operacional.
-5. `Humor de identificação`: distrações e resistência ao ritual, sem ridicularizar estudante, professor ou condição de saúde.
-
-Para a SAFE-K, conteúdo educacional tem prioridade editorial sobre humor. Humor nunca pode ocupar o lugar de orientação jurídica, médica ou pedagógica.
+Para a SAFE-K, pesquisar e produzir somente conteúdo institucional ou educacional.
 
 ### Critério de autoridade
 

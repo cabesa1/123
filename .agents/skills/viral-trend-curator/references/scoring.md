@@ -1,6 +1,6 @@
 # Numeric ranking model
 
-Rank content using verified numbers rather than intuition alone. Compare content within the same platform, similar format, niche, region when relevant, and publication-age window. Do not compare raw TikTok views directly with YouTube views.
+Rank content using verified numbers rather than intuition alone. Compare content within the same platform, similar format, niche, region when relevant, and publication-age window. Do not compare raw TikTok views directly with Instagram views.
 
 ## Required calculations
 

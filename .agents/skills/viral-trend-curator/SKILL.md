@@ -1,6 +1,6 @@
 ---
 name: viral-trend-curator
-description: Discover and numerically rank short-form video references from TikTok, Instagram Reels, YouTube Shorts, and accessible web sources. Use for viral-video research, trend evidence, hooks, formats, and up to five best video opportunities; do not use for generic campaign ideas, full scripts, publishing, or invented metrics.
+description: Discover and numerically rank TikTok and Instagram Reels references using accessible web sources. Use for viral-video research, trend evidence, hooks, formats, and up to five best video opportunities; do not use for generic campaign ideas, full scripts, publishing, or invented metrics.
 ---
 
 # Viral Trend Curator
@@ -13,7 +13,7 @@ Capture niche, target audience, objective, platforms, geography, language, timef
 
 ## Research workflow
 
-1. Search accessible sources and record URL, platform, creator, publication timestamp, capture timestamp, and every publicly visible metric.
+1. Search only TikTok and Instagram Reels references and record URL, platform, creator, publication timestamp, capture timestamp, and every publicly visible metric.
 2. Separate `video de referencia` from `tendencia confirmada`. Confirm a trend only when a repeated pattern appears across multiple independent creators or sources.
 3. Build a comparable set within the same platform, similar format, niche, geography when relevant, and publication-age window.
 4. Read [references/scoring.md](references/scoring.md), calculate the numeric ranking, and retain raw values used in every calculation.
