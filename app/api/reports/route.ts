@@ -4,6 +4,19 @@ import { createManagerAgent } from '@/lib/agents/marketing-orchestrator';
 
 export const runtime = 'nodejs';
 
+function reportQuality(candidate: Awaited<ReturnType<typeof runReporterAgent>>) {
+  const report = candidate.report;
+  const issues: string[] = [];
+  if (!report?.title?.trim()) issues.push('Incluir título específico.');
+  if (!report?.summary?.trim()) issues.push('Incluir resumo executivo.');
+  if (!report?.reportingWindow?.trim()) issues.push('Informar a janela analisada.');
+  if (!Array.isArray(report?.opportunities) || report.opportunities.length === 0 || report.opportunities.length > 5) issues.push('Entregar de 1 a 5 oportunidades.');
+  if (report?.opportunities?.some((item: { source?: string; evidence?: string; nextAction?: string }) => !item.source?.trim() || !item.evidence?.trim() || !item.nextAction?.trim())) issues.push('Toda oportunidade precisa de fonte, evidência e próxima ação.');
+  if (!Array.isArray(report?.nextActions) || report.nextActions.length === 0) issues.push('Incluir próximas ações executáveis.');
+  if (report?.funnel && report.funnel.selected > report.funnel.researched) issues.push('O funil não pode ter mais selecionados que pesquisados.');
+  return issues.length ? issues : true;
+}
+
 const schema = {
   type: 'object', additionalProperties: false,
   properties: {
@@ -23,7 +36,7 @@ export async function POST(request: NextRequest) {
   const selected = Array.isArray(body.selected) ? body.selected : [];
   try {
     const manager = createManagerAgent(brand);
-    const result = await manager.supervise('reporter', () => runReporterAgent(brand, body.category || 'não informada', trends, selected, schema), candidate => Boolean(candidate.report?.title && Array.isArray(candidate.report?.opportunities) && candidate.report.opportunities.length <= 5), 'O relatório não passou no contrato após duas tentativas.');
+    const result = await manager.supervise('reporter', (_attempt, feedback) => runReporterAgent(brand, body.category || 'não informada', trends, selected, schema, feedback), reportQuality, 'O relatório não passou no contrato estrito após três tentativas.');
     return NextResponse.json({ report: result.report, specialistsUsed: result.specialists, agentTrace: manager.trace, manager: manager.summary() });
   } catch (reason) {
     const message = reason instanceof Error ? reason.message : 'Falha desconhecida.';

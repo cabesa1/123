@@ -6,7 +6,7 @@ export function getOpenAIClient() {
 }
 
 export function getOpenAIModel() {
-  return process.env.OPENAI_MODEL || 'gpt-5.4-mini';
+  return process.env.OPENAI_MODEL || 'gpt-5.6-terra';
 }
 
 export async function generateStructured(instructions: string, input: string, schema: Record<string, unknown>, name: string) {

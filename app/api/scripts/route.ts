@@ -4,6 +4,19 @@ import { createManagerAgent } from '@/lib/agents/marketing-orchestrator';
 
 export const runtime = 'nodejs';
 
+function scriptQuality(candidate: Awaited<ReturnType<typeof runHookScriptwriterAgent>>) {
+  const script = candidate.script;
+  const issues: string[] = [];
+  if (!script?.chosenHook?.trim()) issues.push('Criar um gancho principal específico.');
+  if (!Array.isArray(script?.alternativeHooks) || script.alternativeHooks.length !== 2 || script.alternativeHooks.some((hook: string) => !hook.trim())) issues.push('Entregar exatamente dois ganchos alternativos válidos.');
+  if (!Array.isArray(script?.scenes) || script.scenes.length < 3 || script.scenes.length > 8) issues.push('Estruturar de 3 a 8 cenas.');
+  if (script?.scenes?.some((scene: { time?: string; shot?: string; action?: string; purpose?: string }) => !scene.time?.trim() || !scene.shot?.trim() || !scene.action?.trim() || !scene.purpose?.trim())) issues.push('Toda cena precisa de tempo, enquadramento, ação e propósito.');
+  if (!script?.cta?.trim()) issues.push('Incluir CTA claro.');
+  if (!script?.caption?.trim() || !script?.coverText?.trim()) issues.push('Incluir legenda e texto de capa.');
+  if (!Array.isArray(script?.filmingChecklist) || script.filmingChecklist.length === 0) issues.push('Incluir checklist de gravação.');
+  return issues.length ? issues : true;
+}
+
 const schema = {
   type: 'object', additionalProperties: false,
   properties: {
@@ -25,7 +38,7 @@ export async function POST(request: NextRequest) {
   const brand = body.brand === 'SAFE-K' ? 'SAFE-K' : 'Economize.vc';
   try {
     const manager = createManagerAgent(brand);
-    const result = await manager.supervise('hook-scriptwriter', () => runHookScriptwriterAgent(brand, body.category || 'não informada', body.trend, schema), candidate => Boolean(candidate.script?.chosenHook && Array.isArray(candidate.script?.scenes) && candidate.script.scenes.length >= 3), 'O roteiro não passou nos critérios de gancho e cenas após duas tentativas.');
+    const result = await manager.supervise('hook-scriptwriter', (_attempt, feedback) => runHookScriptwriterAgent(brand, body.category || 'não informada', body.trend, schema, feedback), scriptQuality, 'O roteiro não passou no contrato estrito após três tentativas.');
     return NextResponse.json({ script: result.script, specialistsUsed: result.specialists, agentTrace: manager.trace, manager: manager.summary() });
   } catch (reason) {
     const message = reason instanceof Error ? reason.message : 'Falha desconhecida.';

@@ -15,17 +15,20 @@ function string(record: BrightRecord, ...keys: string[]) {
   return undefined;
 }
 
-async function scrape(datasetId: string, sources: string[], tiktok: boolean) {
+async function scrape(datasetId: string, sources: string[]) {
   const token = process.env.BRIGHTDATA_API_TOKEN;
   if (!token) throw new Error('BRIGHTDATA_API_TOKEN_NOT_CONFIGURED');
   const response = await fetch(`https://api.brightdata.com/datasets/v3/scrape?dataset_id=${datasetId}&format=json&include_errors=true`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(tiktok ? { input: sources.map(url => ({ url })) } : sources.map(url => ({ url }))),
+    body: JSON.stringify({ input: sources.map(url => ({ url })) }),
     signal: AbortSignal.timeout(65_000),
   });
-  const data = await response.json() as BrightRecord[] | { snapshot_id?: string; error?: string };
-  if (!response.ok) throw new Error(!Array.isArray(data) && data.error ? data.error : `Bright Data respondeu HTTP ${response.status}.`);
+  const raw = await response.text();
+  let data: BrightRecord[] | { snapshot_id?: string; error?: string; message?: string };
+  try { data = JSON.parse(raw) as typeof data; }
+  catch { throw new Error(`Bright Data respondeu HTTP ${response.status}: ${raw.slice(0, 240) || 'resposta vazia'}`); }
+  if (!response.ok) throw new Error(!Array.isArray(data) ? data.error || data.message || `Bright Data respondeu HTTP ${response.status}.` : `Bright Data respondeu HTTP ${response.status}.`);
   if (!Array.isArray(data)) throw new Error(data.snapshot_id ? `A coleta virou job assíncrono (${data.snapshot_id}); tente novamente em instantes.` : 'Bright Data não retornou registros.');
   return data;
 }
@@ -51,12 +54,11 @@ export async function verifyWithBrightData(sources: string[]) {
   const instagram = sources.filter(source => source.includes('instagram.com/'));
   const tiktok = sources.filter(source => source.includes('tiktok.com/'));
   const [instagramRecords, tiktokRecords] = await Promise.all([
-    instagram.length ? scrape(INSTAGRAM_REELS_DATASET, instagram, false) : Promise.resolve([]),
-    tiktok.length ? scrape(TIKTOK_POSTS_DATASET, tiktok, true) : Promise.resolve([]),
+    instagram.length ? scrape(INSTAGRAM_REELS_DATASET, instagram) : Promise.resolve([]),
+    tiktok.length ? scrape(TIKTOK_POSTS_DATASET, tiktok) : Promise.resolve([]),
   ]);
   return [
     ...instagram.map((source, index) => mapped(source, instagramRecords[index] || {}, 'Instagram')),
     ...tiktok.map((source, index) => mapped(source, tiktokRecords[index] || {}, 'TikTok')),
   ];
 }
-

@@ -136,7 +136,7 @@ Retorne até cinco referências, ou nenhuma sem evidência suficiente. Aceite so
       agentRun.add({ agent: 'manager', status: 'completed', attempt: 1, decision: 'approved', brand, detail: 'Searcher autorizado a usar a pesquisa web do provedor.' });
       const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
       const response = await client.responses.create({
-        model: process.env.OPENAI_MODEL || 'gpt-5.4-mini', instructions: runtime.instructions,
+        model: process.env.OPENAI_MODEL || 'gpt-5.6-terra', instructions: runtime.instructions,
         tools: [{ type: 'web_search_preview', search_context_size: 'high', user_location: { type: 'approximate', country: 'BR', city: 'Sorocaba', region: 'São Paulo' } }],
         input, text: { format: { type: 'json_schema', name: 'trend_results', strict: true, schema } }, store: false,
       });
